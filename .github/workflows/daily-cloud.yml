@@ -1,0 +1,39 @@
+name: Daily cloud scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Backtest mode"
+        required: true
+        default: "fast"
+        type: choice
+        options:
+          - fast
+          - standard
+          - full
+  schedule:
+    # 18:45 UTC is 00:15 IST. This runs after the Indian market day has ended.
+    - cron: "45 18 * * 1-5"
+
+jobs:
+  daily-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily workflow
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/run_daily.py --mode "${{ github.event.inputs.mode || 'fast' }}"
