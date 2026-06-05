@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
+from cloud_app.config import settings
 from cloud_app.db import db, json_dumps, now_iso, row, rows
 from cloud_app.services.market_data_providers import YahooFinanceProvider
 from cloud_app.universe import fetch_nifty200_universe
@@ -37,25 +38,6 @@ def active_symbols() -> list[dict]:
 
 def store_candles(candles) -> int:
     timestamp = now_iso()
-    statement = text(
-        """
-        INSERT INTO market_data_daily
-        (symbol, trade_date, open, high, low, close, adjusted_close, volume, turnover,
-         source, source_metadata_json, created_at)
-        VALUES (:symbol, :trade_date, :open, :high, :low, :close, :adjusted_close, :volume,
-                :turnover, :source, :source_metadata_json, :created_at)
-        ON CONFLICT (symbol, trade_date) DO UPDATE SET
-          open = excluded.open,
-          high = excluded.high,
-          low = excluded.low,
-          close = excluded.close,
-          adjusted_close = excluded.adjusted_close,
-          volume = excluded.volume,
-          turnover = excluded.turnover,
-          source = excluded.source,
-          source_metadata_json = excluded.source_metadata_json
-        """
-    )
     payloads = [
         {
             "symbol": candle.symbol,
@@ -75,13 +57,110 @@ def store_candles(candles) -> int:
     ]
     if not payloads:
         return 0
+    if settings.database_url.startswith("postgresql"):
+        return store_candles_postgres(payloads)
+    return store_candles_batch(payloads)
 
+
+def upsert_statement() -> str:
+    return """
+    INSERT INTO market_data_daily
+    (symbol, trade_date, open, high, low, close, adjusted_close, volume, turnover,
+     source, source_metadata_json, created_at)
+    VALUES (:symbol, :trade_date, :open, :high, :low, :close, :adjusted_close, :volume,
+            :turnover, :source, :source_metadata_json, :created_at)
+    ON CONFLICT (symbol, trade_date) DO UPDATE SET
+      open = excluded.open,
+      high = excluded.high,
+      low = excluded.low,
+      close = excluded.close,
+      adjusted_close = excluded.adjusted_close,
+      volume = excluded.volume,
+      turnover = excluded.turnover,
+      source = excluded.source,
+      source_metadata_json = excluded.source_metadata_json
+    """
+
+
+def store_candles_batch(payloads: list[dict]) -> int:
+    statement = text(
+        upsert_statement()
+    )
     batch_size = 1000
     with db() as conn:
         for start in range(0, len(payloads), batch_size):
             batch = payloads[start : start + batch_size]
             conn.execute(statement, batch)
             print(f"market_data_store stored={min(start + batch_size, len(payloads))}/{len(payloads)}", flush=True)
+    return len(payloads)
+
+
+def store_candles_postgres(payloads: list[dict]) -> int:
+    columns = [
+        "symbol",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "adjusted_close",
+        "volume",
+        "turnover",
+        "source",
+        "source_metadata_json",
+        "created_at",
+    ]
+    with db() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TEMP TABLE candle_stage (
+                  symbol TEXT NOT NULL,
+                  trade_date TEXT NOT NULL,
+                  open REAL NOT NULL,
+                  high REAL NOT NULL,
+                  low REAL NOT NULL,
+                  close REAL NOT NULL,
+                  adjusted_close REAL NOT NULL,
+                  volume INTEGER NOT NULL,
+                  turnover REAL NOT NULL,
+                  source TEXT NOT NULL,
+                  source_metadata_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                ) ON COMMIT DROP
+                """
+            )
+        )
+        raw = conn.connection.driver_connection
+        with raw.cursor() as cursor:
+            with cursor.copy(f"COPY candle_stage ({', '.join(columns)}) FROM STDIN") as copy:
+                for idx, payload in enumerate(payloads, start=1):
+                    copy.write_row(tuple(payload[column] for column in columns))
+                    if idx % 25000 == 0:
+                        print(f"market_data_copy copied={idx}/{len(payloads)}", flush=True)
+        conn.execute(
+            text(
+                """
+                INSERT INTO market_data_daily
+                (symbol, trade_date, open, high, low, close, adjusted_close, volume, turnover,
+                 source, source_metadata_json, created_at)
+                SELECT symbol, trade_date, open, high, low, close, adjusted_close, volume, turnover,
+                       source, source_metadata_json, created_at
+                FROM candle_stage
+                ON CONFLICT (symbol, trade_date) DO UPDATE SET
+                  open = excluded.open,
+                  high = excluded.high,
+                  low = excluded.low,
+                  close = excluded.close,
+                  adjusted_close = excluded.adjusted_close,
+                  volume = excluded.volume,
+                  turnover = excluded.turnover,
+                  source = excluded.source,
+                  source_metadata_json = excluded.source_metadata_json
+                """
+            )
+        )
+    print(f"market_data_store stored={len(payloads)}/{len(payloads)}", flush=True)
     return len(payloads)
 
 
