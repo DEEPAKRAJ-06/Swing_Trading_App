@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import contextlib
 import io
+import os
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,8 +26,16 @@ class YahooFinanceProvider(MarketDataProvider):
         period = "1y" if lookback_days <= 366 else "3y"
         with ThreadPoolExecutor(max_workers=16) as executor:
             futures = {executor.submit(self._fetch_one, symbol, period): symbol for symbol in symbols}
+            completed = 0
             for future in as_completed(futures):
-                candles.extend(future.result())
+                symbol = futures[future]
+                try:
+                    candles.extend(future.result())
+                except Exception as exc:
+                    print(f"market_data_skip symbol={symbol} error={type(exc).__name__}", flush=True)
+                completed += 1
+                if completed % 25 == 0 or completed == len(futures):
+                    print(f"market_data_progress fetched={completed}/{len(futures)} candles={len(candles)}", flush=True)
         if not candles:
             raise RuntimeError("Yahoo Finance returned no NSE candles for the watchlist.")
         return candles
@@ -36,6 +45,8 @@ class YahooFinanceProvider(MarketDataProvider):
         candles = self._fetch_with_chart_api(symbol, provider_symbol, period)
         if candles:
             return candles
+        if os.getenv("ENABLE_YFINANCE_FALLBACK") != "1":
+            return []
         return self._fetch_with_yfinance(symbol, provider_symbol, period)
 
     def _fetch_with_yfinance(self, symbol: str, provider_symbol: str, period: str) -> list[ProviderCandle]:
@@ -85,7 +96,7 @@ class YahooFinanceProvider(MarketDataProvider):
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?range={period}&interval=1d"
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(request, timeout=8) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception:
             return []

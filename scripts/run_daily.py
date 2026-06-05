@@ -14,10 +14,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["fast", "standard", "full"], default="fast")
     args = parser.parse_args()
-    result = run_daily_workflow(mode=args.mode)
+
+    def progress(label: str, pct: int) -> None:
+        print(json.dumps({"progress": pct, "step": label}), flush=True)
+
+    result = run_daily_workflow(mode=args.mode, progress=progress)
     print(json.dumps({"status": "completed", "run_id": result["run_id"], "scan": result["scan"]}, indent=2, default=str))
 
 
 if __name__ == "__main__":
     main()
-
