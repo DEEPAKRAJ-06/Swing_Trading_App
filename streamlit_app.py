@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from urllib.parse import urlparse
 
 from cloud_app.backtester import BACKTEST_MODES, run_walkforward_backtest
+from cloud_app.config import settings
 from cloud_app.db import get_state, initialize_database
 from cloud_app.market_data import latest_prices, sync_market_data
 from cloud_app.scanner import latest_strategy_selection, latest_strategy_validation, list_signals, run_daily_scan
@@ -28,7 +31,52 @@ def pct(value) -> str:
 
 
 def ensure_db() -> None:
-    initialize_database()
+    try:
+        initialize_database()
+    except OperationalError as exc:
+        show_database_error(exc)
+        st.stop()
+    except SQLAlchemyError as exc:
+        show_database_error(exc)
+        st.stop()
+
+
+def database_host_hint() -> tuple[str, str]:
+    normalized = settings.database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    parsed = urlparse(normalized)
+    host = parsed.hostname or "unknown"
+    port = parsed.port or "default"
+    return host, str(port)
+
+
+def show_database_error(exc: Exception) -> None:
+    host, port = database_host_hint()
+    st.error("Database connection failed before the app could load.")
+    st.caption(f"Configured database host: `{host}` on port `{port}`. Password and username are hidden.")
+
+    if host.startswith("db.") and host.endswith("supabase.co"):
+        st.warning(
+            "This is the direct Supabase database host. Streamlit Cloud and GitHub Actions usually need "
+            "the Supabase pooled connection string instead."
+        )
+        st.markdown(
+            "Update both Streamlit secrets and GitHub Actions secrets so `DATABASE_URL` uses a "
+            "`pooler.supabase.com` host and ends with `?sslmode=require`."
+        )
+    elif "pooler.supabase.com" in host:
+        st.warning(
+            "The app is using a Supabase pooler host, so the remaining likely causes are an incorrect "
+            "database password, wrong pooler mode/port, or missing SSL."
+        )
+        st.markdown(
+            "Re-copy the exact Supabase pooler URI, replace `[YOUR-PASSWORD]`, and keep "
+            "`?sslmode=require` at the end."
+        )
+    else:
+        st.warning("The database host does not look like the normal Supabase direct or pooler hostname.")
+
+    with st.expander("Technical error type"):
+        st.code(type(exc).__name__)
 
 
 def selected_panel(selection: dict) -> None:
@@ -176,4 +224,3 @@ with tab_deploy:
         """
     )
     st.warning("This app is research-only. It does not place broker orders.")
-
