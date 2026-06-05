@@ -37,46 +37,52 @@ def active_symbols() -> list[dict]:
 
 def store_candles(candles) -> int:
     timestamp = now_iso()
-    stored = 0
+    statement = text(
+        """
+        INSERT INTO market_data_daily
+        (symbol, trade_date, open, high, low, close, adjusted_close, volume, turnover,
+         source, source_metadata_json, created_at)
+        VALUES (:symbol, :trade_date, :open, :high, :low, :close, :adjusted_close, :volume,
+                :turnover, :source, :source_metadata_json, :created_at)
+        ON CONFLICT (symbol, trade_date) DO UPDATE SET
+          open = excluded.open,
+          high = excluded.high,
+          low = excluded.low,
+          close = excluded.close,
+          adjusted_close = excluded.adjusted_close,
+          volume = excluded.volume,
+          turnover = excluded.turnover,
+          source = excluded.source,
+          source_metadata_json = excluded.source_metadata_json
+        """
+    )
+    payloads = [
+        {
+            "symbol": candle.symbol,
+            "trade_date": candle.trade_date,
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "adjusted_close": candle.adjusted_close,
+            "volume": candle.volume,
+            "turnover": candle.turnover,
+            "source": candle.source,
+            "source_metadata_json": json_dumps(candle.metadata),
+            "created_at": timestamp,
+        }
+        for candle in candles
+    ]
+    if not payloads:
+        return 0
+
+    batch_size = 1000
     with db() as conn:
-        for candle in candles:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO market_data_daily
-                    (symbol, trade_date, open, high, low, close, adjusted_close, volume, turnover,
-                     source, source_metadata_json, created_at)
-                    VALUES (:symbol, :trade_date, :open, :high, :low, :close, :adjusted_close, :volume,
-                            :turnover, :source, :source_metadata_json, :created_at)
-                    ON CONFLICT (symbol, trade_date) DO UPDATE SET
-                      open = excluded.open,
-                      high = excluded.high,
-                      low = excluded.low,
-                      close = excluded.close,
-                      adjusted_close = excluded.adjusted_close,
-                      volume = excluded.volume,
-                      turnover = excluded.turnover,
-                      source = excluded.source,
-                      source_metadata_json = excluded.source_metadata_json
-                    """
-                ),
-                {
-                    "symbol": candle.symbol,
-                    "trade_date": candle.trade_date,
-                    "open": candle.open,
-                    "high": candle.high,
-                    "low": candle.low,
-                    "close": candle.close,
-                    "adjusted_close": candle.adjusted_close,
-                    "volume": candle.volume,
-                    "turnover": candle.turnover,
-                    "source": candle.source,
-                    "source_metadata_json": json_dumps(candle.metadata),
-                    "created_at": timestamp,
-                },
-            )
-            stored += 1
-    return stored
+        for start in range(0, len(payloads), batch_size):
+            batch = payloads[start : start + batch_size]
+            conn.execute(statement, batch)
+            print(f"market_data_store stored={min(start + batch_size, len(payloads))}/{len(payloads)}", flush=True)
+    return len(payloads)
 
 
 def sync_market_data(lookback_days: int = 760) -> dict:
